@@ -1,0 +1,12 @@
+stages:
+  train:
+    cmd: python backend/train.py --data data/chest_xray --epochs 5
+    deps:
+      - backend/train.py
+      - backend/common.py
+      - data/chest_xray
+    outs:
+      - models/model.pth
+    metrics:
+      - models/metrics.json:
+          cache: false

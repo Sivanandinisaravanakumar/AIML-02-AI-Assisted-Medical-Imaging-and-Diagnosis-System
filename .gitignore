@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+dist/
+storage/*
+!storage/.gitkeep
+data/demo/
+.env
+# data and model weights are tracked with DVC (see README)
+/data/chest_xray
+/models/model.pth

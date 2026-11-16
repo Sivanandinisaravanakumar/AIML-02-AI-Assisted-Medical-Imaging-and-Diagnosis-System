@@ -1,0 +1,153 @@
+"""FastAPI service: upload scan -> DenseNet121 prediction -> Grad-CAM heatmap -> doctor review.
+
+Run:  cd backend && uvicorn app:app --reload --port 8000
+"""
+import os
+import sqlite3
+import uuid
+from contextlib import closing
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Literal
+
+import requests
+import torch
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+
+from common import CLASSES, DenseNetCAM, get_device, grad_cam, heatmap_rgba, pil_to_input, read_image
+
+ROOT = Path(__file__).resolve().parent.parent
+MODEL_PATH = Path(os.getenv("MODEL_PATH", ROOT / "models" / "model.pth"))
+STORAGE = Path(os.getenv("STORAGE_DIR", ROOT / "storage"))
+ORTHANC_URL = os.getenv("ORTHANC_URL", "").rstrip("/")
+DB = STORAGE / "cases.db"
+STORAGE.mkdir(parents=True, exist_ok=True)
+
+app = FastAPI(title="AI-Assisted Medical Imaging and Diagnosis System")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+DEVICE = get_device()
+MODEL = DenseNetCAM(num_classes=2, pretrained=False).to(DEVICE)
+MODEL_LOADED = False
+if MODEL_PATH.exists():
+    MODEL.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
+    MODEL_LOADED = True
+else:
+    print(f"[warn] {MODEL_PATH} not found - predictions will come from an UNTRAINED model. Run train.py first.")
+MODEL.eval()
+
+
+# ------------------------------------------------------------------ db
+def db():
+    con = sqlite3.connect(DB)
+    con.row_factory = sqlite3.Row
+    return con
+
+
+with closing(db()) as con:
+    con.execute("""CREATE TABLE IF NOT EXISTS cases (
+        id TEXT PRIMARY KEY, filename TEXT, is_dicom INTEGER, orthanc_id TEXT,
+        label TEXT, confidence REAL, prob_normal REAL, prob_pneumonia REAL,
+        model_trained INTEGER, created_at TEXT,
+        status TEXT DEFAULT 'pending', decision TEXT, final_label TEXT,
+        notes TEXT, reviewer TEXT, reviewed_at TEXT)""")
+    con.commit()
+
+
+def now():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def get_case(case_id: str) -> dict:
+    with closing(db()) as con:
+        row = con.execute("SELECT * FROM cases WHERE id = ?", (case_id,)).fetchone()
+    if row is None:
+        raise HTTPException(404, "Case not found")
+    return dict(row)
+
+
+# ------------------------------------------------------------- routes
+@app.get("/health")
+def health():
+    return {"status": "ok", "model_loaded": MODEL_LOADED, "device": str(DEVICE),
+            "orthanc": bool(ORTHANC_URL)}
+
+
+@app.post("/predict")
+async def predict(file: UploadFile = File(...)):
+    data = await file.read()
+    try:
+        img, is_dicom = read_image(data, file.filename or "upload")
+    except Exception as e:
+        raise HTTPException(400, f"Could not read image: {e}")
+
+    x = pil_to_input(img).unsqueeze(0).to(DEVICE)
+    cam, probs, c = grad_cam(MODEL, x)
+
+    case_id = uuid.uuid4().hex[:12]
+    img.resize((448, 448)).save(STORAGE / f"{case_id}_image.png")
+    heatmap_rgba(cam).save(STORAGE / f"{case_id}_heatmap.png")
+
+    orthanc_id = None
+    if is_dicom and ORTHANC_URL:  # archive the original study in the PACS
+        try:
+            r = requests.post(f"{ORTHANC_URL}/instances", data=data,
+                              headers={"Content-Type": "application/dicom"}, timeout=10)
+            orthanc_id = r.json().get("ID")
+        except Exception as e:
+            print("[warn] Orthanc upload failed:", e)
+
+    with closing(db()) as con:
+        con.execute(
+            "INSERT INTO cases (id, filename, is_dicom, orthanc_id, label, confidence, prob_normal,"
+            " prob_pneumonia, model_trained, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (case_id, file.filename, int(is_dicom), orthanc_id, CLASSES[c], float(probs[c]),
+             float(probs[0]), float(probs[1]), int(MODEL_LOADED), now()))
+        con.commit()
+    return get_case(case_id)
+
+
+@app.get("/cases")
+def list_cases():
+    with closing(db()) as con:
+        rows = con.execute("SELECT * FROM cases ORDER BY created_at DESC LIMIT 100").fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.get("/cases/{case_id}")
+def case(case_id: str):
+    return get_case(case_id)
+
+
+@app.get("/cases/{case_id}/image")
+def case_image(case_id: str):
+    get_case(case_id)
+    return FileResponse(STORAGE / f"{case_id}_image.png")
+
+
+@app.get("/cases/{case_id}/heatmap")
+def case_heatmap(case_id: str):
+    get_case(case_id)
+    return FileResponse(STORAGE / f"{case_id}_heatmap.png")
+
+
+class Review(BaseModel):
+    decision: Literal["agree", "override"]
+    final_label: Literal["NORMAL", "PNEUMONIA"]
+    notes: str = ""
+    reviewer: str = "Doctor"
+
+
+@app.post("/cases/{case_id}/review")
+def review(case_id: str, body: Review):
+    get_case(case_id)
+    with closing(db()) as con:
+        con.execute(
+            "UPDATE cases SET status='reviewed', decision=?, final_label=?, notes=?, reviewer=?,"
+            " reviewed_at=? WHERE id=?",
+            (body.decision, body.final_label, body.notes, body.reviewer, now(), case_id))
+        con.commit()
+    return get_case(case_id)
