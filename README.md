@@ -208,3 +208,10 @@ The following workflows were tested locally:
 ## 12. Disclaimer
 
 This application is an academic research prototype developed for educational purposes. It is not a medical device and must not be used to diagnose, treat, or make decisions about patients. All AI predictions require appropriate professional assessment.
+
+## Project Documentation
+
+- [Architecture and API Documentation](docs/architecture-and-api.md)
+- [Experimental Results and Limitations](docs/results-and-limitations.md)
+- [Final Presentation Outline](docs/final-presentation-outline.md)
+- [Individual Reflection Template](docs/individual-reflection-template.md)
