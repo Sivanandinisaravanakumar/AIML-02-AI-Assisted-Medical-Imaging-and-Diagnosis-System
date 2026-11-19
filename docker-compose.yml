@@ -1,12 +1,13 @@
 services:
-  orthanc:                       # DICOM server (PACS)
+  orthanc:
     image: jodogne/orthanc
     ports:
-      - "8042:8042"              # web UI / REST  -> http://localhost:8042
-      - "4242:4242"              # DICOM protocol
+      - "127.0.0.1:8042:8042"
+      - "127.0.0.1:4243:4242"
     environment:
       ORTHANC__REMOTE_ACCESS_ALLOWED: "true"
-      ORTHANC__AUTHENTICATION_ENABLED: "false"
+      ORTHANC__AUTHENTICATION_ENABLED: "true"
+      ORTHANC__REGISTERED_USERS: '{"orthanc":"orthanc"}'
     volumes:
       - orthanc-data:/var/lib/orthanc/db
 
@@ -18,11 +19,15 @@ services:
       - "8000:8000"
     environment:
       ORTHANC_URL: http://orthanc:8042
-      MODEL_PATH: /app/models/model.pth
+      ORTHANC_USERNAME: orthanc
+      ORTHANC_PASSWORD: orthanc
+      MODEL_PATH: /app/models/rsna_model.pth
       STORAGE_DIR: /app/storage
+      RSNA_LABELS_CSV: /app/datasets/stage_2_train_labels.csv
     volumes:
       - ./models:/app/models
       - ./storage:/app/storage
+      - "${RSNA_DATASET_DIR:-./data/rsna}:/app/datasets:ro"
     depends_on:
       - orthanc
 
