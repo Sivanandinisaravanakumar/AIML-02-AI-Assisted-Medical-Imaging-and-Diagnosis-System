@@ -1,4 +1,4 @@
-"""FastAPI service: upload scan -> DenseNet121 prediction -> Grad-CAM heatmap -> doctor review.
+﻿"""FastAPI service: upload scan -> DenseNet121 prediction -> Grad-CAM heatmap -> doctor review.
 
 Run:  cd backend && uvicorn app:app --reload --port 8000
 """
@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from common import CLASSES, DenseNetCAM, get_device, grad_cam, heatmap_rgba, pil_to_input, read_image
 
 ROOT = Path(__file__).resolve().parent.parent
-MODEL_PATH = Path(os.getenv("MODEL_PATH", ROOT / "models" / "model.pth"))
+MODEL_PATH = Path(os.getenv("MODEL_PATH", ROOT / "models" / "rsna_model.pth"))
 STORAGE = Path(os.getenv("STORAGE_DIR", ROOT / "storage"))
 ORTHANC_URL = os.getenv("ORTHANC_URL", "").rstrip("/")
 DB = STORAGE / "cases.db"
@@ -54,6 +54,17 @@ with closing(db()) as con:
         model_trained INTEGER, created_at TEXT,
         status TEXT DEFAULT 'pending', decision TEXT, final_label TEXT,
         notes TEXT, reviewer TEXT, reviewed_at TEXT)""")
+    con.execute("""CREATE TABLE IF NOT EXISTS audit_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        case_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        decision TEXT,
+        final_label TEXT,
+        notes TEXT,
+        reviewer TEXT,
+        timestamp TEXT NOT NULL
+    )""")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_audit_logs_case_id ON audit_logs(case_id)")
     con.commit()
 
 
@@ -100,12 +111,19 @@ async def predict(file: UploadFile = File(...)):
         except Exception as e:
             print("[warn] Orthanc upload failed:", e)
 
+    created_at = now()
     with closing(db()) as con:
         con.execute(
             "INSERT INTO cases (id, filename, is_dicom, orthanc_id, label, confidence, prob_normal,"
             " prob_pneumonia, model_trained, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
             (case_id, file.filename, int(is_dicom), orthanc_id, CLASSES[c], float(probs[c]),
-             float(probs[0]), float(probs[1]), int(MODEL_LOADED), now()))
+             float(probs[0]), float(probs[1]), int(MODEL_LOADED), created_at)
+        )
+        # Record that a scan was uploaded and processed.
+        con.execute(
+            "INSERT INTO audit_logs (case_id, action, timestamp) VALUES (?, ?, ?)",
+            (case_id, "SCAN_UPLOADED_AND_ANALYZED", created_at)
+        )
         con.commit()
     return get_case(case_id)
 
@@ -125,29 +143,66 @@ def case(case_id: str):
 @app.get("/cases/{case_id}/image")
 def case_image(case_id: str):
     get_case(case_id)
-    return FileResponse(STORAGE / f"{case_id}_image.png")
+    path = STORAGE / f"{case_id}_image.png"
+    if not path.exists():
+        raise HTTPException(404, "Image not found")
+    return FileResponse(path)
 
 
 @app.get("/cases/{case_id}/heatmap")
 def case_heatmap(case_id: str):
     get_case(case_id)
-    return FileResponse(STORAGE / f"{case_id}_heatmap.png")
+    path = STORAGE / f"{case_id}_heatmap.png"
+    if not path.exists():
+        raise HTTPException(404, "Heatmap not found")
+    return FileResponse(path)
 
 
 class Review(BaseModel):
     decision: Literal["agree", "override"]
-    final_label: Literal["NORMAL", "PNEUMONIA"]
+    final_label: Literal["NO_LUNG_OPACITY", "PNEUMONIA"]
     notes: str = ""
     reviewer: str = "Doctor"
 
 
 @app.post("/cases/{case_id}/review")
 def review(case_id: str, body: Review):
+    # Confirm that the case exists before writing the review.
     get_case(case_id)
+    reviewed_at = now()
+
     with closing(db()) as con:
-        con.execute(
+        # Save the doctor's final decision in the cases table.
+        cursor = con.execute(
             "UPDATE cases SET status='reviewed', decision=?, final_label=?, notes=?, reviewer=?,"
             " reviewed_at=? WHERE id=?",
-            (body.decision, body.final_label, body.notes, body.reviewer, now(), case_id))
+            (body.decision, body.final_label, body.notes, body.reviewer, reviewed_at, case_id)
+        )
+        if cursor.rowcount == 0:
+            raise HTTPException(404, "Case not found")
+
+        # Keep a separate audit record of this review action.
+        con.execute(
+            """INSERT INTO audit_logs
+               (case_id, action, decision, final_label, notes, reviewer, timestamp)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (case_id, "DOCTOR_REVIEW", body.decision, body.final_label,
+             body.notes, body.reviewer, reviewed_at)
+        )
         con.commit()
+
     return get_case(case_id)
+
+
+@app.get("/cases/{case_id}/audit")
+def get_case_audit(case_id: str):
+    # Return the chronological audit history for one case.
+    get_case(case_id)
+    with closing(db()) as con:
+        rows = con.execute(
+            "SELECT * FROM audit_logs WHERE case_id=? ORDER BY id ASC",
+            (case_id,)
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+

@@ -1,12 +1,11 @@
 stages:
-  train:
-    cmd: python backend/train.py --data data/chest_xray --epochs 5
+  train_rsna:
+    cmd: python backend/train_rsna.py
     deps:
-      - backend/train.py
-      - backend/common.py
-      - data/chest_xray
+    - backend/common.py
+    - backend/train_rsna.py
     outs:
-      - models/model.pth
+    - models/rsna_model.pth
     metrics:
-      - models/metrics.json:
-          cache: false
+    - models/rsna_metrics.json:
+        cache: false

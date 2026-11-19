@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const API = import.meta.env.VITE_API_URL || "http://127.0.0.1:8010";
 
 async function api(path, options) {
   const res = await fetch(`${API}${path}`, options);
@@ -181,7 +181,7 @@ function CaseView({ c, opacity, setOpacity, onSaved }) {
         <h3>Model finding</h3>
         <p className="finding"><strong>{c.label}</strong> <span className="muted">at {pct(c.confidence)} confidence</span></p>
         <div className="bars">
-          <Bar name="Normal" v={c.prob_normal} />
+          <Bar name="No Lung Opacity" v={c.prob_normal} />
           <Bar name="Pneumonia" v={c.prob_pneumonia} />
         </div>
       </section>
@@ -197,7 +197,7 @@ function CaseView({ c, opacity, setOpacity, onSaved }) {
         {decision === "override" && (
           <label className="field">Final diagnosis
             <select value={finalLabel} onChange={(e) => setFinalLabel(e.target.value)}>
-              <option value="NORMAL">NORMAL</option>
+              <option value="NO_LUNG_OPACITY">NO_LUNG_OPACITY</option>
               <option value="PNEUMONIA">PNEUMONIA</option>
             </select>
           </label>

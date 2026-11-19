@@ -1,138 +1,210 @@
 # AI-Assisted Medical Imaging and Diagnosis System
 
-A web platform where a chest scan (PNG, JPG or DICOM) is uploaded, classified by a deep learning model,
-explained with a Grad-CAM heatmap, and then reviewed by a doctor who can agree with or override the AI.
+An AI-assisted chest X-ray research prototype that accepts PNG, JPG, and DICOM images, predicts whether a scan shows **Pneumonia** or **No Lung Opacity**, generates a Grad-CAM heatmap, and supports doctor review.
 
-> Research prototype. Not a medical device and not for clinical use.
+> **Research prototype only. Not a medical device. Predictions and confidence scores must not be used for clinical diagnosis or treatment decisions.**
 
-## Architecture
+## 1. Project Overview
 
-```mermaid
-flowchart LR
-    U[Doctor / React UI] -->|upload scan| API[FastAPI backend]
-    API -->|DICOM only| O[(Orthanc DICOM server)]
-    API --> M[MONAI preprocessing + DenseNet121]
-    M --> G[Grad-CAM heatmap]
-    G --> API
-    API --> DB[(SQLite cases + storage)]
-    API -->|label, confidence, heatmap| U
-    U -->|agree / override + notes| API
-```
+The system combines deep learning and medical-image processing to support an experimental chest X-ray review workflow.
 
-| Part | Tech |
+Main features:
+- Upload chest X-ray images in PNG, JPG, or DICOM format.
+- Classify images using a DenseNet121 model.
+- Display predicted label and confidence score.
+- Generate a Grad-CAM heatmap for model explainability.
+- View the original scan and heatmap overlay.
+- Adjust heatmap strength.
+- Review AI predictions using Agree or Override.
+- Store case information and doctor review details in SQLite.
+- Maintain an audit log of scan uploads and doctor reviews.
+
+## 2. Technology Stack
+
+| Component | Technology |
 |---|---|
-| Preprocessing, augmentation | MONAI transforms |
-| Model | PyTorch, DenseNet121 fine-tuned from ImageNet |
-| Explainability | Grad-CAM (implemented in `backend/common.py`) |
-| DICOM | pydicom for reading, Orthanc for storage |
-| Data / model versioning | DVC (`dvc.yaml`) |
-| API | FastAPI + SQLite |
-| UI | React (Vite) |
-| Deployment | Docker Compose (backend, frontend, Orthanc) |
+| Deep learning | PyTorch, DenseNet121 |
+| Medical image preprocessing | MONAI |
+| DICOM processing | pydicom |
+| Explainability | Grad-CAM |
+| Backend API | FastAPI |
+| Database | SQLite |
+| Frontend | React, Vite |
+| Image processing | Pillow, NumPy |
 
-## Project layout
+## 3. Dataset
 
+This project uses the **RSNA Pneumonia Detection Challenge** dataset.
+
+Dataset files used:
+- `stage_2_train_images`: DICOM training images
+- `stage_2_train_labels.csv`: patient labels and bounding-box annotations
+- `stage_2_test_images`: DICOM test images
+
+The training CSV contains multiple annotation rows for some patients. Patient-level labels are consolidated using the maximum `Target` value.
+
+Class labels:
+- `NO_LUNG_OPACITY` — Target 0
+- `PNEUMONIA` — Target 1
+
+The dataset is stored locally and is not included in this repository.
+
+## 4. Model Training and Evaluation
+
+A small CPU-based pilot training run was performed using 400 patients from the RSNA dataset.
+
+| Item | Value |
+|---|---:|
+| Total sampled patients | 400 |
+| Training patients | 320 |
+| Validation patients | 80 |
+| Training epochs | 1 |
+| Training approach | DenseNet121 classifier head |
+| Device | CPU |
+| Validation accuracy | 67.5% |
+| Validation AUC | 0.73125 |
+
+Validation confusion matrix:
+
+| | Predicted No Lung Opacity | Predicted Pneumonia |
+|---|---:|---:|
+| Actual No Lung Opacity | 30 | 10 |
+| Actual Pneumonia | 16 | 24 |
+
+Model artifacts:
+- `models/rsna_model.pth` — RSNA pilot model used by the backend.
+- `models/rsna_metrics.json` — pilot training and validation metrics.
+- `models/model.pth` and `models/metrics.json` — separate synthetic demo artifacts; they are not the RSNA-trained model.
+
+**Important:** These results are from a small pilot experiment and are not clinical performance measurements. The validation sample is limited and further training and independent validation are required.
+
+## 5. Project Structure
+
+```text
+AIML-02-Medical-Imaging/
+├── backend/
+│   ├── app.py
+│   ├── common.py
+│   ├── train.py
+│   ├── train_rsna.py
+│   ├── make_demo_data.py
+│   └── requirements.txt
+├── frontend/
+│   ├── src/
+│   ├── package.json
+│   └── ...
+├── models/
+│   ├── rsna_model.pth
+│   ├── rsna_metrics.json
+│   ├── model.pth
+│   └── metrics.json
+├── storage/
+├── data/
+├── docker-compose.yml
+├── dvc.yaml
+└── README.md
 ```
-backend/    app.py (API), common.py (model, Grad-CAM, DICOM), train.py, make_demo_data.py
-frontend/   React app
-models/     model.pth + metrics.json (created by train.py)
-data/       datasets (not committed, tracked with DVC)
-docker-compose.yml, dvc.yaml
-```
 
-## 1. Setup
+## 6. Setup
 
-```bash
+Use Python and Node.js on Windows.
+
+Create and activate a virtual environment if one is not already available:
+
+```powershell
 python -m venv .venv
-# Windows: .venv\Scripts\activate      Mac/Linux: source .venv/bin/activate
-pip install -r backend/requirements.txt
+.\.venv\Scripts\Activate.ps1
 ```
 
-## 2. Data
+Install backend dependencies:
 
-Download the Kaggle dataset **Chest X-Ray Images (Pneumonia)** and place it so you have:
-
-```
-data/chest_xray/train/{NORMAL,PNEUMONIA}/
-data/chest_xray/test/{NORMAL,PNEUMONIA}/
-```
-
-(If the zip creates `chest_xray/chest_xray/`, move the inner folder up one level.)
-
-No dataset yet? Generate synthetic images to test the pipeline (not medical data):
-
-```bash
-python backend/make_demo_data.py          # creates data/demo
-```
-
-## 3. Train
-
-```bash
-python backend/train.py --data data/chest_xray --epochs 5
-# CPU only? use a subset:   python backend/train.py --data data/chest_xray --epochs 3 --limit 400
-# smoke test:               python backend/train.py --data data/demo --epochs 3
-```
-
-Writes `models/model.pth` and `models/metrics.json` (accuracy, AUC, confusion matrix, per-class report).
-Training on a free Kaggle or Colab GPU is much faster than a laptop CPU.
-
-## 4. Run locally
-
-```bash
-# terminal 1 - backend
+```powershell
 cd backend
-uvicorn app:app --reload --port 8000
+pip install -r requirements.txt
+```
 
-# terminal 2 - frontend
-cd frontend
+Install frontend dependencies:
+
+```powershell
+cd ..\frontend
 npm install
-npm run dev          # http://localhost:5173
 ```
 
-API docs: http://localhost:8000/docs
+## 7. Run the Application
 
-## 5. Run with Docker (backend + frontend + Orthanc)
+Run the backend from the `backend` directory:
 
-```bash
-docker compose up --build
+```powershell
+cd backend
+python -m uvicorn app:app --host 127.0.0.1 --port 8010
 ```
 
-- UI: http://localhost:5173
-- API: http://localhost:8000/docs
-- Orthanc: http://localhost:8042 (uploaded DICOM files appear here)
+Backend API:
+- Health check: `http://127.0.0.1:8010/health`
+- Swagger documentation: `http://127.0.0.1:8010/docs`
 
-`models/` and `storage/` are mounted, so train first and the container will pick up `models/model.pth`.
+In a second terminal, run the frontend:
 
-## 6. DVC
-
-```bash
-dvc init
-dvc add data/chest_xray
-git add data/chest_xray.dvc data/.gitignore .dvc
-dvc repro            # re-runs training when code or data change
+```powershell
+cd frontend
+npm run dev -- --host 127.0.0.1
 ```
 
-## API summary
+Frontend:
+- `http://127.0.0.1:5173/`
 
-| Method | Path | Purpose |
+Keep both terminals running while using the application.
+
+## 8. API Endpoints
+
+| Method | Endpoint | Purpose |
 |---|---|---|
-| POST | `/predict` | Upload a scan, get label, confidence, heatmap |
-| GET | `/cases` | List cases |
-| GET | `/cases/{id}/image`, `/cases/{id}/heatmap` | Scan and Grad-CAM overlay |
-| POST | `/cases/{id}/review` | Doctor decision: agree or override, with notes |
+| GET | `/health` | Check backend and model status |
+| POST | `/predict` | Upload and classify a scan |
+| GET | `/cases` | List stored cases |
+| GET | `/cases/{case_id}` | Get case details |
+| GET | `/cases/{case_id}/image` | Retrieve original image |
+| GET | `/cases/{case_id}/heatmap` | Retrieve Grad-CAM heatmap |
+| POST | `/cases/{case_id}/review` | Save doctor review |
+| GET | `/cases/{case_id}/audit` | View case audit history |
 
-## Results
+## 9. Testing and Verified Workflows
 
-Fill in after training (copy from `models/metrics.json`):
+The following workflows were tested locally:
 
-| Metric | Value |
-|---|---|
-| Test accuracy | |
-| Test AUC | |
-| Pneumonia recall | |
+- Backend health endpoint returned a successful response.
+- DICOM upload and AI prediction returned successfully.
+- Original scan display worked in the frontend.
+- Grad-CAM heatmap generation and display worked.
+- Heatmap strength adjustment worked.
+- Doctor Agree review was saved successfully.
+- Doctor Override review was saved successfully.
+- Case status was updated after review.
+- Audit logs recorded scan upload and doctor review actions.
+- Python backend files passed syntax compilation.
+- Frontend production build completed successfully.
 
-## Limitations and future work
+## 10. Current Limitations
 
-- Only chest X-ray classification is trained. CT and MRI volumes can be uploaded as DICOM (middle slice is used), but there is no model trained for them.
-- The Kaggle dataset is small and from one source, so results will not generalise to other hospitals.
-- Add user login, an audit log, and 3D MONAI models for CT/MRI.
+- The model was trained on a small 400-patient pilot subset for one epoch.
+- The validation metrics are preliminary and do not establish clinical accuracy.
+- The model is intended for experimental chest X-ray classification only.
+- Grad-CAM is an explainability visualization; it is not a validated lesion segmentation system.
+- CT and MRI diagnosis are not implemented.
+- Orthanc was not connected or verified in the tested local workflow.
+- Docker deployment has not been verified as part of the tested workflow.
+- User authentication and production-grade access control are not implemented.
+
+## 11. Future Enhancements
+
+- Train and validate using a larger dataset.
+- Perform independent external validation.
+- Improve model calibration and reliability.
+- Integrate and test Orthanc for DICOM storage.
+- Add user authentication and role-based access.
+- Improve audit and security features.
+- Explore dedicated models for CT and MRI.
+
+## 12. Disclaimer
+
+This application is an academic research prototype developed for educational purposes. It is not a medical device and must not be used to diagnose, treat, or make decisions about patients. All AI predictions require appropriate professional assessment.
